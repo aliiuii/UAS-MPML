@@ -1,123 +1,73 @@
-import streamlit as st
+# app.py
+
+from flask import Flask, request, render_template, jsonify
+import pickle
 import pandas as pd
-import joblib
-import warnings
+import numpy as np
 
-# Mengabaikan peringatan versi Scikit-learn yang mungkin tidak cocok
-warnings.filterwarnings("ignore", category=UserWarning)
+# Inisialisasi aplikasi Flask
+app = Flask(__name__)
 
-# --- KONFIGURASI HALAMAN ---
-# Mengatur judul tab, ikon, dan tata letak. Ini harus menjadi perintah Streamlit pertama.
-st.set_page_config(
-    page_title="Prediksi Rating Sepatu",
-    page_icon="👟",
-    layout="centered" 
-)
+# Memuat model, encoders, dan data unik yang telah disimpan
+try:
+    with open('model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    with open('encoders.pkl', 'rb') as f:
+        encoders = pickle.load(f)
+    with open('unique_data.pkl', 'rb') as f:
+        unique_data = pickle.load(f)
+except FileNotFoundError:
+    print("Pastikan file 'model.pkl', 'encoders.pkl', dan 'unique_data.pkl' ada.")
+    model, encoders, unique_data = None, None, None
 
-# --- FUNGSI UNTUK GAYA TAMPILAN (CSS) ---
-def local_css():
-    """Menyisipkan CSS kustom untuk meniru tampilan dari file HTML."""
-    st.markdown("""
-        <style>
-        /* Import Google Font 'Inter' */
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+# Route untuk halaman utama
+@app.route('/')
+def home():
+    if not unique_data:
+        return "Error: Data unik untuk form tidak ditemukan."
+    # Menambahkan form_data kosong agar tidak error saat halaman pertama kali dimuat
+    return render_template('index.html', unique_data=unique_data, form_data={})
+
+# Route untuk menerima data dan memberikan prediksi
+@app.route('/predict', methods=['POST'])
+def predict():
+    if not model or not encoders:
+        return jsonify({'error': 'Model atau encoder tidak termuat.'}), 500
+
+    try:
+        # Mengambil data dari form
+        data = request.form
         
-        /* Mengubah font utama Streamlit */
-        html, body, [class*="st-"], [class*="css-"] {
-            font-family: 'Inter', sans-serif;
-        }
+        # Membuat DataFrame dari input
+        input_df = pd.DataFrame([data])
+        
+        # Membuat salinan untuk encoding
+        input_encoded = input_df.copy()
 
-        /* Memberi background gradien seperti di HTML */
-        .stApp {
-            background-image: linear-gradient(to bottom right, #f8fafc, #e0e7ff);
-            background-attachment: fixed;
-            background-size: cover;
-        }
+        # Melakukan encoding pada input menggunakan encoder yang sudah disimpan
+        for col in ['MenuCategory', 'MenuItem', 'Ingredients']:
+            le = encoders[col]
+            # Menggunakan lambda untuk menangani nilai yang mungkin tidak ada di encoder
+            input_encoded[col] = input_encoded[col].apply(lambda x: le.transform([x])[0] if x in le.classes_ else -1)
 
-        /* Styling untuk judul utama */
-        h1 {
-            font-weight: 700 !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
+        # Mengubah tipe data harga
+        input_encoded['Price'] = input_encoded['Price'].astype(float)
 
-# --- FUNGSI PEMUATAN DENGAN CACHING (TETAP SAMA, KARENA EFISIEN) ---
+        # Melakukan prediksi
+        prediction_encoded = model.predict(input_encoded)
+        
+        # Mengubah hasil prediksi dari angka kembali ke teks (High, Medium, Low)
+        prediction_text = encoders['Profitability'].inverse_transform(prediction_encoded)
 
-@st.cache_resource
-def load_model():
-    """Memuat pipeline model yang sudah termasuk preprocessor."""
-    try:
-        model = joblib.load("shoe_rating_predictor_pipeline.pkl")
-        return model
-    except FileNotFoundError:
-        st.error("File model 'shoe_rating_predictor_pipeline.pkl' tidak ditemukan.")
-        return None
+        # Mengembalikan hasil prediksi ke halaman web
+        return render_template('index.html', 
+                               unique_data=unique_data,
+                               prediction_text=f'Prediksi Profitabilitas: {prediction_text[0]}',
+                               form_data=data)
+
     except Exception as e:
-        st.error(f"Error saat memuat model: {e}")
-        return None
+        return render_template('index.html', unique_data=unique_data, prediction_text=f'Error: {str(e)}')
 
-@st.cache_data
-def load_unique_brands():
-    """Memuat daftar merek dari file yang sudah diproses (lebih efisien)."""
-    try:
-        with open("unique_brands.txt", "r") as f:
-            brands = [line.strip() for line in f]
-        return sorted(brands)
-    except FileNotFoundError:
-        return sorted(['ASIAN', 'Reebok', 'Puma', 'Adidas', 'Bata'])
-
-# --- MEMUAT DATA DAN MODEL ---
-model_pipeline = load_model()
-brands = load_unique_brands()
-student_name = "Fajriya Hakim" # Ganti dengan nama Anda
-
-# --- APLIKASI UTAMA ---
-
-# Terapkan CSS kustom
-local_css()
-
-# Header aplikasi
-st.title("Prediksi Rating Sepatu")
-st.markdown(f"Proyek UAS oleh: **{student_name}**")
-st.write("---") # Garis pemisah
-
-# Form prediksi yang meniru desain HTML
-with st.form("prediction_form"):
-    st.subheader("Masukkan Detail Sepatu")
-    
-    # Input field yang sesuai dengan HTML
-    brand = st.selectbox("Merek Sepatu", brands)
-    how_many_sold = st.number_input("Jumlah Terjual", min_value=0, step=1, placeholder="Contoh: 500")
-    current_price = st.number_input("Harga Saat Ini (dalam Rupee)", min_value=0.0, step=50.0, format="%.2f", placeholder="Contoh: 1099.00")
-
-    # Tombol submit
-    submitted = st.form_submit_button("✨ Prediksi Rating")
-
-# Logika setelah form disubmit
-if submitted:
-    if model_pipeline:
-        input_data = pd.DataFrame({
-            'Brand_Name': [brand],
-            'How_Many_Sold': [how_many_sold],
-            'Current_Price': [current_price]
-        })
-
-        try:
-            # Prediksi menggunakan pipeline
-            prediction = model_pipeline.predict(input_data)
-            rating = round(prediction[0], 2)
-            
-            # Tampilkan hasil dengan format sukses (background hijau)
-            st.success(f"**Hasil Prediksi Rating: {rating} / 5.0**")
-            
-            # Menambahkan progress bar sebagai visualisasi rating
-            st.progress(rating / 5.0)
-
-        except Exception as e:
-            # Tampilkan hasil dengan format error (background merah)
-            st.error(f"Terjadi Error: {e}")
-            st.info("Pastikan model yang dimuat adalah pipeline lengkap dan input sudah benar.")
-
-    else:
-        # Jika model tidak berhasil dimuat
-        st.error("Model tidak dapat dimuat. Prediksi gagal.")
+# Menjalankan aplikasi
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8050, debug=False)
